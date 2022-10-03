@@ -28,11 +28,9 @@
 - [Dropping the exceptions throwing logic](#dropping-the-exceptions-throwing-logic)
 - [Usage](#usage)
   - [Creating an `ErrorOr<result>`](#creating-an-errororresult)
-    - [From Value, using implicit conversion](#from-value-using-implicit-conversion)
-    - [From Value, using `From`](#from-value-using-from)
+    - [From Value](#from-value)
     - [From Single Error](#from-single-error)
-    - [From List of Errors, using implicit conversion](#from-list-of-errors-using-implicit-conversion)
-    - [From List of Errors, using `From`](#from-list-of-errors-using-from)
+    - [From List of Errors](#from-list-of-errors)
   - [Checking if the `ErrorOr<result>` is an error](#checking-if-the-errororresult-is-an-error)
   - [Accessing the `ErrorOr<result>` result](#accessing-the-errororresult-result)
     - [Accessing the Value](#accessing-the-value)
@@ -129,7 +127,7 @@ ErrorOr<Created> AddUser(User user)
         return Error.Failure(description: "Failed to add user");
     }
 
-    return Result.Created;
+    return Results.Created;
 }
 ```
 
@@ -251,9 +249,8 @@ return createUserResult.MatchFirst(
 You have validation logic such as `MediatR` behaviors, you can drop the exceptions throwing logic and simply return a list of errors from the pipeline behavior
 
 ```csharp
-public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>
-    where TResponse : IErrorOr
+public class ValidationBehavior<TRequest, TResult> : IPipelineBehavior<TRequest, ErrorOr<TResult>>
+    where TRequest : IRequest<ErrorOr<TResult>>
 {
     private readonly IValidator<TRequest>? _validator;
 
@@ -262,42 +259,27 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
         _validator = validator;
     }
 
-    public async Task<TResponse> Handle(
+    public async Task<ErrorOr<TResult>> Handle(
         TRequest request,
         CancellationToken cancellationToken,
-        RequestHandlerDelegate<TResponse> next)
+        RequestHandlerDelegate<ErrorOr<TResult>> next)
     {
         if (_validator == null)
         {
             return await next();
         }
 
-        var validationResult = await _validator.ValidateAsync(request, cancellationToken);
+        var validationResult = _validator.Validate(request);
 
-        if (validationResult.IsValid)
+        if (validationResult.IsError)
         {
-            return await next();
+            return validationResult.Errors
+               .ConvertAll(validationFailure => Error.Validation(
+                   code: validationFailure.PropertyName,
+                   description: validationFailure.ErrorMessage));
         }
 
-        return TryCreateResponseFromErrors(validationResult.Errors, out var response)
-            ? response
-            : throw new ValidationException(validationResult.Errors);
-    }
-
-    private static bool TryCreateResponseFromErrors(List<ValidationFailure> validationFailures, out TResponse response)
-    {
-        List<Error> errors = validationFailures.ConvertAll(x => Error.Validation(
-                code: x.PropertyName,
-                description: x.ErrorMessage));
-
-        response = (TResponse?)typeof(TResponse)
-            .GetMethod(
-                name: nameof(ErrorOr<object>.From),
-                bindingAttr: BindingFlags.Static | BindingFlags.Public,
-                types: new[] { typeof(List<Error>) })?
-            .Invoke(null, new[] { errors })!;
-
-        return response is not null;
+        return await next();
     }
 }
 ```
@@ -308,7 +290,7 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
 
 There are implicit converters from `TResult`, `Error`, `List<Error>` to `ErrorOr<TResult>`
 
-### From Value, using implicit conversion
+### From Value
 
 ```csharp
 ErrorOr<int> result = 5;
@@ -318,19 +300,6 @@ ErrorOr<int> result = 5;
 public ErrorOr<int> GetValue()
 {
     return 5;
-}
-```
-
-### From Value, using `From`
-
-```csharp
-ErrorOr<int> result = ErrorOr.From(5);
-```
-
-```csharp
-public ErrorOr<int> GetValue()
-{
-    return ErrorOr.From(5);
 }
 ```
 
@@ -347,7 +316,7 @@ public ErrorOr<int> GetValue()
 }
 ```
 
-### From List of Errors, using implicit conversion
+### From List of Errors
 
 ```csharp
 ErrorOr<int> result = new List<Error> { Error.Unexpected(), Error.Validation() };
@@ -357,23 +326,6 @@ ErrorOr<int> result = new List<Error> { Error.Unexpected(), Error.Validation() }
 public ErrorOr<int> GetValue()
 {
     return new List<Error>
-    {
-        Error.Unexpected(),
-        Error.Validation()
-    };
-}
-```
-
-### From List of Errors, using `From`
-
-```csharp
-ErrorOr<int> result = ErrorOr<int>.From(new List<Error> { Error.Unexpected(), Error.Validation() });
-```
-
-```csharp
-public ErrorOr<int> GetValue()
-{
-    return ErrorOr<int>.From(List<Error>
     {
         Error.Unexpected(),
         Error.Validation()
